@@ -764,93 +764,121 @@ boot_write_status(const struct boot_loader_state *state, struct boot_status *bs)
 /*
  * Validate image hash/signature and optionally the security counter in a slot.
  */
-static fih_ret
-boot_image_check(struct boot_loader_state *state, struct image_header *hdr,
-                 const struct flash_area *fap, struct boot_status *bs)
-{
-    TARGET_STATIC uint8_t tmpbuf[BOOT_TMPBUF_SZ];
-    int rc;
-    FIH_DECLARE(fih_rc, FIH_FAILURE);
+ static fih_ret
+ boot_image_check(struct boot_loader_state *state, struct image_header *hdr,
+                  const struct flash_area *fap, struct boot_status *bs)
+ {
+     TARGET_STATIC uint8_t tmpbuf[BOOT_TMPBUF_SZ];
+     int rc;
+     FIH_DECLARE(fih_rc, FIH_FAILURE);
+ 
+     BOOT_LOG_DBG("In %s: state=%p, hdr=%p, fap=%p, bs=%p\n",
+                  __func__, (void*)state, (void*)hdr, (void*)fap, (void*)bs);
+     BOOT_LOG_DBG("  hdr.magic=0x%08x load_addr=0x%08x img_size=0x%08x flags=0x%08x\n",
+                  hdr->ih_magic, hdr->ih_load_addr,
+                  hdr->ih_img_size, hdr->ih_flags);
+ 
+ #if (BOOT_IMAGE_NUMBER == 1)
+     (void)state;
+ #endif
+     (void)bs;
+     (void)rc;
+ 
+ #if defined(MCUBOOT_ENC_IMAGES) && !defined(MCUBOOT_RAM_LOAD)
+     if (MUST_DECRYPT(fap, BOOT_CURR_IMG(state), hdr)) {
+         BOOT_LOG_DBG("  decrypt needed for slot %u\n", BOOT_CURR_IMG(state));
+ #if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_SERIAL_RECOVERY)
+         rc = boot_enc_load(state, 1, hdr, fap, bs, 0);
+ #else
+         rc = boot_enc_load(state, 1, hdr, fap, bs);
+ #endif
+         BOOT_LOG_DBG("  boot_enc_load returned %d\n", rc);
+         if (rc < 0) {
+             BOOT_LOG_DBG("Leaving %s: decrypt failed\n", __func__);
+             FIH_RET(fih_rc);
+         }
+         if (rc == 0 && boot_enc_set_key(BOOT_CURR_ENC(state), 1, bs)) {
+             BOOT_LOG_DBG("Leaving %s: set_key failed\n", __func__);
+             FIH_RET(fih_rc);
+         }
+     }
+ #endif
+ 
+     BOOT_LOG_DBG("  about to call bootutil_img_validate\n");
+ #if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_SERIAL_RECOVERY)
+     FIH_CALL(bootutil_img_validate, fih_rc,
+              state, hdr, fap, tmpbuf, BOOT_TMPBUF_SZ,
+              NULL, 0, NULL, 0);
+ #else
+     FIH_CALL(bootutil_img_validate, fih_rc,
+              state, hdr, fap, tmpbuf, BOOT_TMPBUF_SZ,
+              NULL, 0, NULL);
+ #endif
+     BOOT_LOG_DBG("  validation returned fih_rc=%d\n", fih_rc);
+ 
+     BOOT_LOG_DBG("Leaving %s\n", __func__);
+     FIH_RET(fih_rc);
+ }
+ 
+ #if !defined(MCUBOOT_DIRECT_XIP) && !defined(MCUBOOT_RAM_LOAD)
+ /*
+  * Validate loader and application images in split-image mode.
+  */
+ static fih_ret
+ split_image_check(struct image_header *app_hdr,
+                   const struct flash_area *app_fap,
+                   struct image_header *loader_hdr,
+                   const struct flash_area *loader_fap)
+ {
+     static void *tmpbuf;
+     uint8_t loader_hash[32];
+     FIH_DECLARE(fih_rc, FIH_FAILURE);
+ 
+     BOOT_LOG_DBG("In %s: app_hdr=%p, app_fap=%p, loader_hdr=%p, loader_fap=%p\n",
+                  __func__, (void*)app_hdr, (void*)app_fap,
+                  (void*)loader_hdr, (void*)loader_fap);
+ 
+     if (!tmpbuf) {
+         tmpbuf = malloc(BOOT_TMPBUF_SZ);
+         BOOT_LOG_DBG("  allocated tmpbuf=%p\n", tmpbuf);
+         if (!tmpbuf) {
+             BOOT_LOG_DBG("  malloc failed\n");
+             FIH_RET(fih_rc);
+         }
+     }
+ 
+     BOOT_LOG_DBG("  validating loader image\n");
+ #if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_SERIAL_RECOVERY)
+     FIH_CALL(bootutil_img_validate, fih_rc, NULL, loader_hdr, loader_fap,
+              tmpbuf, BOOT_TMPBUF_SZ, NULL, 0, loader_hash, 0);
+ #else
+     FIH_CALL(bootutil_img_validate, fih_rc, NULL, loader_hdr, loader_fap,
+              tmpbuf, BOOT_TMPBUF_SZ, NULL, 0, loader_hash);
+ #endif
+     BOOT_LOG_DBG("  loader validation fih_rc=%d\n", fih_rc);
+     if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
+         BOOT_LOG_DBG("Leaving %s: loader invalid\n", __func__);
+         FIH_RET(fih_rc);
+     }
+ 
+     BOOT_LOG_DBG("  validating app image\n");
+ #if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_SERIAL_RECOVERY)
+     FIH_CALL(bootutil_img_validate, fih_rc, NULL, app_hdr, app_fap,
+              tmpbuf, BOOT_TMPBUF_SZ, loader_hash, 32, NULL, 0);
+ #else
+     FIH_CALL(bootutil_img_validate, fih_rc, NULL, app_hdr, app_fap,
+              tmpbuf, BOOT_TMPBUF_SZ, loader_hash, 32, NULL);
+ #endif
+     BOOT_LOG_DBG("  app validation fih_rc=%d\n", fih_rc);
+ 
+     BOOT_LOG_DBG("Leaving %s\n", __func__);
+     FIH_RET(fih_rc);
+ }
+ #endif /* !MCUBOOT_DIRECT_XIP && !MCUBOOT_RAM_LOAD */
 
-#if (BOOT_IMAGE_NUMBER == 1)
-    (void)state;
-#endif
 
-    (void)bs;
-    (void)rc;
 
-    /* In the case of ram loading the image has already been decrypted as it is
-     * decrypted when copied in ram
-     */
-#if defined(MCUBOOT_ENC_IMAGES) && !defined(MCUBOOT_RAM_LOAD)
-    if (MUST_DECRYPT(fap, BOOT_CURR_IMG(state), hdr)) {
-#if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_SERIAL_RECOVERY)
-        rc = boot_enc_load(state, 1, hdr, fap, bs, 0);
-#else
-        rc = boot_enc_load(state, 1, hdr, fap, bs);
-#endif
-        if (rc < 0) {
-            FIH_RET(fih_rc);
-        }
-        if (rc == 0 && boot_enc_set_key(BOOT_CURR_ENC(state), 1, bs)) {
-            FIH_RET(fih_rc);
-        }
-    }
-#endif
-
-#if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_SERIAL_RECOVERY)
-    FIH_CALL(bootutil_img_validate, fih_rc, state, hdr, fap, tmpbuf, BOOT_TMPBUF_SZ,
-             NULL, 0, NULL, 0);
-#else
-    FIH_CALL(bootutil_img_validate, fih_rc, state, hdr, fap, tmpbuf, BOOT_TMPBUF_SZ,
-             NULL, 0, NULL);
-#endif
-
-    FIH_RET(0);
-}
-
-#if !defined(MCUBOOT_DIRECT_XIP) && !defined(MCUBOOT_RAM_LOAD)
-static fih_ret
-split_image_check(struct image_header *app_hdr,
-                  const struct flash_area *app_fap,
-                  struct image_header *loader_hdr,
-                  const struct flash_area *loader_fap)
-{
-    static void *tmpbuf;
-    uint8_t loader_hash[32];
-    FIH_DECLARE(fih_rc, FIH_FAILURE);
-
-    if (!tmpbuf) {
-        tmpbuf = malloc(BOOT_TMPBUF_SZ);
-        if (!tmpbuf) {
-            goto out;
-        }
-    }
-
-#if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_SERIAL_RECOVERY)
-    FIH_CALL(bootutil_img_validate, fih_rc, NULL, loader_hdr, loader_fap,
-             tmpbuf, BOOT_TMPBUF_SZ, NULL, 0, loader_hash, 0);
-#else
-    FIH_CALL(bootutil_img_validate, fih_rc, NULL, loader_hdr, loader_fap,
-             tmpbuf, BOOT_TMPBUF_SZ, NULL, 0, loader_hash);
-#endif
-    if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
-        FIH_RET(fih_rc);
-    }
-
-#if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_SERIAL_RECOVERY)
-    FIH_CALL(bootutil_img_validate, fih_rc, NULL, app_hdr, app_fap,
-             tmpbuf, BOOT_TMPBUF_SZ, loader_hash, 32, NULL, 0);
-#else
-    FIH_CALL(bootutil_img_validate, fih_rc, NULL, app_hdr, app_fap,
-             tmpbuf, BOOT_TMPBUF_SZ, loader_hash, 32, NULL);
-#endif
-
-out:
-    FIH_RET(fih_rc);
-}
-#endif /* !MCUBOOT_DIRECT_XIP && !MCUBOOT_RAM_LOAD */
-
+ 
 /*
  * Check that this is a valid header.  Valid means that the magic is
  * correct, and that the sizes/offsets are "sane".  Sane means that
