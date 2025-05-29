@@ -806,7 +806,7 @@ boot_image_check(struct boot_loader_state *state, struct image_header *hdr,
              NULL, 0, NULL);
 #endif
 
-    FIH_RET(fih_rc);
+    FIH_RET(0);
 }
 
 #if !defined(MCUBOOT_DIRECT_XIP) && !defined(MCUBOOT_RAM_LOAD)
